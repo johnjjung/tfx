@@ -24,7 +24,7 @@ import os
 import tempfile
 from typing import Any, Dict, Text
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tfx import types
 from tfx.components.base import base_component

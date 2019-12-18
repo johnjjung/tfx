@@ -28,7 +28,7 @@ import types
 from typing import Any, Dict, List, Optional, Set, Text, Type
 
 import absl
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from ml_metadata.metadata_store import metadata_store
 from ml_metadata.proto import metadata_store_pb2
