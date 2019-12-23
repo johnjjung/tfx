@@ -34,6 +34,8 @@
     (TFX 0.14.0) as the base image.
 *   Allow users to specify the region to use when serving with for AI Platform.
 *   Allow users to give deterministic job id to AI Platform Training job.
+*   System-managed artifact properties are now stored as ML Metadata artifact
+    custom properties.
 
 ### Deprecations
 
