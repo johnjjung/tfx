@@ -30,8 +30,10 @@
 *   Raise exceptions when container building fails.
 *   Enhanced custom slack component by adding a kubeflow example.
 *   Allow windows style paths in Transform component cache.
-*   Fixed bug in CLI (--engine=kubeflow) which uses hard coded obslete image
+*   Fixed bug in CLI (--engine=kubeflow) which uses hard coded obsolete image
     (TFX 0.14.0) as the base image.
+*   Fixed bug in CLI (--engine=kubeflow) which could not handle skaffold
+    response when an already built image is reused.
 *   Allow users to specify the region to use when serving with for AI Platform.
 *   Allow users to give deterministic job id to AI Platform Training job.
 
