@@ -59,12 +59,19 @@ class ImporterDriver(base_driver.BaseDriver):
       desired_split_names = artifact_utils.encode_split_names([s or ''])
       previous_artifacts = []
       for previous_artifact in unfiltered_previous_artifacts:
-        split_names = previous_artifact.properties.get('split_names', None)
+        split_names = previous_artifact.properties.get(SPLIT_KEY, None)
         if split_names and split_names.string_value == desired_split_names:
           previous_artifacts.append(previous_artifact)
 
-      result = types.Artifact(type_name=destination_channel.type_name)
-      result.split_names = desired_split_names
+      # TODO(b/138664975): remove usages of `type_name` strings.
+      if destination_channel.type:
+        result = destination_channel.type()
+      else:
+        result = types.Artifact(type_name=destination_channel.type_name)
+      # TODO(ccy): refactor importer to treat split name just like any other
+      # property.
+      if SPLIT_KEY in result.artifact_type.properties:
+        result.split_names = desired_split_names
       result.uri = uri
 
       # If any registered artifact with the same uri also has the same
@@ -73,12 +80,12 @@ class ImporterDriver(base_driver.BaseDriver):
       # in the destination channel.
       if bool(previous_artifacts) and not reimport:
         absl.logging.info('Reusing existing artifact')
-        result.set_artifact(max(previous_artifacts, key=lambda m: m.id))
+        result.set_mlmd_artifact(max(previous_artifacts, key=lambda m: m.id))
       else:
         [registered_artifact
         ] = self._metadata_handler.publish_artifacts([result])
         absl.logging.info('Registered new artifact: %s' % registered_artifact)
-        result.set_artifact(registered_artifact)
+        result.set_mlmd_artifact(registered_artifact)
 
       results.append(result)
 
@@ -176,7 +183,10 @@ class ImporterNode(base_node.BaseNode):
     artifacts = []
     for split in self._split:
       new_artifact = artifact_type()
-      new_artifact.split_names = artifact_utils.encode_split_names([split])
+      # TODO(ccy): get rid of this logic when arbitrary property import is
+      # implemented in the importer.
+      if artifact_type.PROPERTIES and 'split_names' in artifact_type.PROPERTIES:
+        new_artifact.split_names = artifact_utils.encode_split_names([split])
       artifacts.append(new_artifact)
     self._output_dict = {
         IMPORT_RESULT_KEY:

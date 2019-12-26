@@ -47,6 +47,28 @@ class ArtifactState(object):
 DEFAULT_EXAMPLE_SPLITS = ['train', 'eval']
 
 
+class PropertyType(object):
+  INT = 'int'
+  STRING = 'string'
+
+
+class Property(object):
+  """Property specified for an Artifact."""
+  _ALLOWED_MLMD_TYPES = {
+      PropertyType.INT: metadata_store_pb2.INT,
+      PropertyType.STRING: metadata_store_pb2.STRING,
+  }
+
+  def __init__(self, type):  # pylint: disable=redefined-builtin
+    if type not in Property._ALLOWED_MLMD_TYPES:
+      raise ValueError('Property type must be one of %s.' %
+                       list(Property._ALLOWED_MLMD_TYPES.keys()))
+    self.type = type
+
+  def mlmd_type(self):
+    return Property._ALLOWED_MLMD_TYPES[self.type]
+
+
 class Artifact(json_utils.Jsonable):
   """TFX artifact used for orchestration.
 
@@ -59,11 +81,41 @@ class Artifact(json_utils.Jsonable):
   with the type for this artifact subclass. Users of the subclass may then omit
   the "type_name" field when construction the object.
 
+  A user may specify artifact type-specific properties for an Artifact subclass
+  by overriding the PROPERTIES dictionary, as detailed below.
+
   Note: the behavior of this class is experimental, without backwards
   compatibility guarantees, and may change in upcoming releases.
   """
 
+  # String artifact type name used to identify the type in ML Metadata
+  # database. Must be overridden by subclass.
+  #
+  # Example usage:
+  #
+  # TYPE_NAME = 'MyTypeName'
   TYPE_NAME = None
+
+  # Optional dictionary of property name strings as keys and `Property`
+  # objects as values, used to specify the artifact type's properties.
+  # Subsequently, this artifact property may be accessed as Python attributes
+  # of the artifact object.
+  #
+  # Example usage:
+  #
+  # PROPERTIES = {
+  #   'span': Property(type=PropertyType.INT),
+  #   # Comma separated of splits for an artifact. Empty string means artifact
+  #   # has no split.
+  #   'split_names': Property(type=PropertyType.STRING),
+  # }
+  #
+  # Subsequently, these properties can be stored and accessed as
+  # `myartifact.span` and `myartifact.split_name`, respectively.
+  PROPERTIES = None
+
+  # Initialization flag to support setattr / getattr behavior.
+  _initialized = False
 
   def __init__(self, type_name: Optional[Text] = None):
     """Construct an instance of Artifact.
@@ -97,50 +149,109 @@ class Artifact(json_utils.Jsonable):
           'The "type_name" field must be passed to specify a type for this '
           'Artifact.')
 
+    # Type name string.
+    self._type_name = type_name
+    # MLMD artifact type proto object.
+    self._artifact_type = self._construct_artifact_type(type_name)
+    # Underlying MLMD artifact proto object.
+    self._artifact = metadata_store_pb2.Artifact()
+    # Initialization flag to prevent recursive getattr / setattr errors.
+    self._initialized = True
+
+  def _construct_artifact_type(self, type_name):
     artifact_type = metadata_store_pb2.ArtifactType()
     artifact_type.name = type_name
-    artifact_type.properties['type_name'] = metadata_store_pb2.STRING
-    # This indicates the state of an artifact. A state can be any of the
-    # followings: PENDING, PUBLISHED, MISSING, DELETING, DELETED
-    # TODO(ruoyu): Maybe switch to artifact top-level state if it's supported.
-    artifact_type.properties['state'] = metadata_store_pb2.STRING
-    # Span number of an artifact. For the same artifact type produced by the
-    # same executor, this number should always increase.
-    artifact_type.properties['span'] = metadata_store_pb2.INT
-    # Comma separated splits recognized. Empty string means artifact has no
-    # split.
-    artifact_type.properties['split_names'] = metadata_store_pb2.STRING
-    # TODO(b/135056715): Rely on MLMD context for pipeline grouping for
-    # artifacts once it's ready.
-    # The name of the pipeline that produces the artifact.
-    artifact_type.properties['pipeline_name'] = metadata_store_pb2.STRING
-    # The name of the component that produces the artifact.
-    artifact_type.properties['producer_component'] = metadata_store_pb2.STRING
-    # The name of the artifact, used to differentiate same type of artifact
-    # produced by the same component.
-    artifact_type.properties['name'] = metadata_store_pb2.STRING
+    if self.__class__.PROPERTIES:
+      # Perform validation on PROPERTIES dictionary.
+      if not isinstance(self.__class__.PROPERTIES, dict):
+        raise ValueError(
+            'Artifact subclass %s.PROPERTIES is not a dictionary.' %
+            self.__class__)
+      for key, value in self.__class__.PROPERTIES.items():
+        if not (isinstance(key, (Text, bytes)) and isinstance(value, Property)):
+          raise ValueError(
+              ('Artifact subclass %s.PROPERTIES dictionary must have keys of '
+               'type string and values of type artifact.Property.') %
+              self.__class__)
 
-    self.artifact_type = artifact_type
+      # Populate ML Metadata artifact properties dictionary.
+      for key, value in self.__class__.PROPERTIES.items():
+        artifact_type.properties[key] = value.mlmd_type()
+    return artifact_type
 
-    artifact = metadata_store_pb2.Artifact()
-    artifact.properties['type_name'].string_value = type_name
+  def __getattr__(self, name: Text) -> Any:
+    """Custom __getattr__ to allow access to artifact properties."""
+    if name == '_artifact_type':
+      # Prevent infinite recursion when used with copy.deepcopy().
+      raise AttributeError()
+    if name not in self._artifact_type.properties:
+      raise AttributeError('Artifact has no property %r.' % name)
+    property_mlmd_type = self._artifact_type.properties[name]
+    if property_mlmd_type == metadata_store_pb2.STRING:
+      return self._artifact.properties[name].string_value
+    elif property_mlmd_type == metadata_store_pb2.INT:
+      return self._artifact.properties[name].int_value
+    else:
+      raise Exception('Unknown MLMD type %r for property %r.' %
+                      (property_mlmd_type, name))
 
-    self.artifact = artifact
+  def __setattr__(self, name: Text, value: Any):
+    """Custom __setattr__ to allow access to artifact properties."""
+    if not self._initialized:
+      object.__setattr__(self, name, value)
+      return
+    if name not in self._artifact_type.properties:
+      if name in Artifact.__dict__ or name in self.__dict__:
+        # Use any provided getter / setter if available.
+        object.__setattr__(self, name, value)
+        return
+      # In the case where we do not handle this via an explicit getter /
+      # setter, we assume that the user implied an artifact attribute store,
+      # and we raise an exception since such an attribute was not explicitly
+      # defined in the Artifact PROPERTIES dictionary.
+      raise AttributeError('Cannot set unknown property %r on artifact %r.' %
+                           (name, self))
+    property_mlmd_type = self._artifact_type.properties[name]
+    if property_mlmd_type == metadata_store_pb2.STRING:
+      if not isinstance(value, (Text, bytes)):
+        raise Exception(
+            'Expected string value for property %r; got %r instead.' %
+            (name, value))
+      self._artifact.properties[name].string_value = value
+    elif property_mlmd_type == metadata_store_pb2.INT:
+      if not isinstance(value, int):
+        raise Exception(
+            'Expected integer value for property %r; got %r instead.' %
+            (name, value))
+      self._artifact.properties[name].int_value = value
+    else:
+      raise Exception('Unknown MLMD type %r for property %r.' %
+                      (property_mlmd_type, name))
+
+  def set_mlmd_artifact(self, artifact: metadata_store_pb2.Artifact):
+    """Replace the MLMD artifact object on this artifact."""
+    self._artifact = artifact
+
+  def set_mlmd_artifact_type(self,
+                             artifact_type: metadata_store_pb2.ArtifactType):
+    """Set entire ArtifactType in this object."""
+    self._artifact_type = artifact_type
+    self._artifact.type_id = artifact_type.id
 
   def __repr__(self):
     return 'Artifact(type_name: {}, uri: {}, id: {})'.format(
-        self.artifact_type.name, self.uri, str(self.id))
+        self._artifact_type.name, self.uri, str(self.id))
 
   def to_json_dict(self) -> Dict[Text, Any]:
     return {
         'artifact':
             json.loads(
                 json_format.MessageToJson(
-                    message=self.artifact, preserving_proto_field_name=True)),
+                    message=self._artifact, preserving_proto_field_name=True)),
         'artifact_type':
             json.loads(
                 json_format.MessageToJson(
-                    message=self.artifact_type,
+                    message=self._artifact_type,
                     preserving_proto_field_name=True)),
     }
 
@@ -151,123 +262,135 @@ class Artifact(json_utils.Jsonable):
     artifact_type = metadata_store_pb2.ArtifactType()
     json_format.Parse(json.dumps(dict_data['artifact_type']), artifact_type)
     result = Artifact(artifact_type.name)
-    result.set_artifact_type(artifact_type)
-    result.set_artifact(artifact)
+    result.set_mlmd_artifact_type(artifact_type)
+    result.set_mlmd_artifact(artifact)
     return result
 
+  # Read-only properties.
+  @property
+  def type_name(self):
+    return self._type_name
+
+  @property
+  def artifact_type(self):
+    return self._artifact_type
+
+  @property
+  def mlmd_artifact(self):
+    return self._artifact
+
+  # Settable properties for all artifact types.
   @property
   def uri(self) -> Text:
-    """URI of underlying artifact."""
-    return self.artifact.uri
+    """Artifact URI."""
+    return self._artifact.uri
 
   @uri.setter
   def uri(self, uri: Text):
-    """Set URI of underlying artifact."""
-    self.artifact.uri = uri
+    """Setter for artifact URI."""
+    self._artifact.uri = uri
 
   @property
   def id(self) -> int:
     """Id of underlying artifact."""
-    return self.artifact.id
+    return self._artifact.id
 
   @id.setter
   def id(self, artifact_id: int):
     """Set id of underlying artifact."""
-    self.artifact.id = artifact_id
-
-  @property
-  def span(self) -> int:
-    """Span of underlying artifact."""
-    return self.artifact.properties['span'].int_value
-
-  @span.setter
-  def span(self, span: int):
-    """Set span of underlying artifact."""
-    self.artifact.properties['span'].int_value = span
+    self._artifact.id = artifact_id
 
   @property
   def type_id(self) -> int:
     """Id of underlying artifact type."""
-    return self.artifact.type_id
+    return self._artifact.type_id
 
   @type_id.setter
   def type_id(self, type_id: int):
     """Set id of underlying artifact type."""
-    self.artifact.type_id = type_id
+    self._artifact.type_id = type_id
+
+  # System-managed properties for all artifact types. Will be deprecated soon
+  # in favor of a unified getter / setter interface and MLMD context.
+  #
+  # TODO(b/135056715): Rely on MLMD context for pipeline grouping for
+  # artifacts once it's ready.
+  #
+  # The following system properties are used:
+  #   - name: The name of the artifact, used to differentiate same type of
+  #       artifact produced by the same component.
+  #   - state: The state of an artifact; can be one of PENDING, PUBLISHED,
+  #       MISSING, DELETING, DELETED.
+  #   - pipeline_name: The name of the pipeline that produces the artifact.
+  #   - producer_component: The name of the component that produces the
+  #       artifact.
+  def _get_system_property(self, key: Text) -> Text:
+    if (key in self._artifact_type.properties and
+        key in self._artifact.properties):
+      # Legacy artifact types which have explicitly defined system properties.
+      return self._artifact.properties[key].string_value
+    return self._artifact.custom_properties[key].string_value
+
+  def _set_system_property(self, key: Text, value: Text):
+    if (key in self._artifact_type.properties and
+        key in self._artifact.properties):
+      self._artifact.properties[key].string_value = value
+    else:
+      self._artifact.custom_properties[key].string_value = value
 
   @property
-  def type_name(self) -> Text:
-    """Name of underlying artifact type."""
-    return self.artifact_type.name
+  def name(self) -> Text:
+    """Name of the underlying artifact."""
+    return self._get_system_property('name')
+
+  @name.setter
+  def name(self, name: Text):
+    """Set name of the underlying artifact."""
+    self._set_system_property('name', name)
 
   @property
   def state(self) -> Text:
     """State of the underlying artifact."""
-    return self.artifact.properties['state'].string_value
+    return self._get_system_property('state')
 
   @state.setter
   def state(self, state: Text):
     """Set state of the underlying artifact."""
-    self.artifact.properties['state'].string_value = state
-
-  @property
-  def split_names(self) -> Text:
-    """Split of the underlying artifact is in."""
-    return self.artifact.properties['split_names'].string_value
-
-  @split_names.setter
-  def split_names(self, split: Text):
-    """Set state of the underlying artifact."""
-    self.artifact.properties['split_names'].string_value = split
+    self._set_system_property('state', state)
 
   @property
   def pipeline_name(self) -> Text:
     """Name of the pipeline that produce the artifact."""
-    return self.artifact.properties['pipeline_name'].string_value
+    return self._get_system_property('pipeline_name')
 
   @pipeline_name.setter
   def pipeline_name(self, pipeline_name: Text):
     """Set name of the pipeline that produce the artifact."""
-    self.artifact.properties['pipeline_name'].string_value = pipeline_name
+    self._set_system_property('pipeline_name', pipeline_name)
 
   @property
   def producer_component(self) -> Text:
     """Producer component of the artifact."""
-    return self.artifact.properties['producer_component'].string_value
+    return self._get_system_property('producer_component')
 
   @producer_component.setter
   def producer_component(self, producer_component: Text):
     """Set producer component of the artifact."""
-    self.artifact.properties[
-        'producer_component'].string_value = producer_component
+    self._set_system_property('producer_component', producer_component)
 
-  @property
-  def name(self) -> Text:
-    """Name of the artifact."""
-    return self.artifact.properties['name'].string_value
-
-  @name.setter
-  def name(self, name: Text):
-    """Set the name of the artifact."""
-    self.artifact.properties['name'].string_value = name
-
-  def set_artifact(self, artifact: metadata_store_pb2.Artifact):
-    """Set entire artifact in this object."""
-    self.artifact = artifact
-
-  def set_artifact_type(self, artifact_type: metadata_store_pb2.ArtifactType):
-    """Set entire ArtifactType in this object."""
-    self.artifact_type = artifact_type
-    self.artifact.type_id = artifact_type.id
-
+  # Custom property accessors.
   def set_string_custom_property(self, key: Text, value: Text):
     """Set a custom property of string type."""
-    self.artifact.custom_properties[key].string_value = value
+    self._artifact.custom_properties[key].string_value = value
 
   def set_int_custom_property(self, key: Text, value: int):
     """Set a custom property of int type."""
-    self.artifact.custom_properties[key].int_value = builtins.int(value)
+    self._artifact.custom_properties[key].int_value = builtins.int(value)
+
+  def get_string_custom_property(self, key: Text, value: Text) -> Text:
+    """Get a custom property of string type."""
+    return self._artifact.custom_properties[key].string_value
 
   def get_int_custom_property(self, key: Text) -> int:
     """Get a custom property of int type."""
-    return self.artifact.custom_properties[key].int_value
+    return self._artifact.custom_properties[key].int_value
