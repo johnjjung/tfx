@@ -22,6 +22,7 @@ import copy
 import os
 import mock
 import tensorflow as tf
+from ml_metadata.proto import metadata_store_pb2
 from tfx import types
 from tfx.components.base import base_driver
 from tfx.orchestration import data_types
@@ -81,7 +82,7 @@ class BaseDriverTest(tf.test.TestCase):
                 artifacts=[types.Artifact(type_name='output_a')])
     }
     execution_id = 1
-    context_id = 123
+    contexts = [metadata_store_pb2.Context()]
     exec_properties = copy.deepcopy(self._exec_properties)
     driver_args = data_types.DriverArgs(enable_cache=True)
     pipeline_info = data_types.PipelineInfo(
@@ -89,14 +90,14 @@ class BaseDriverTest(tf.test.TestCase):
         pipeline_root=os.environ.get('TEST_TMP_DIR', self.get_temp_dir()),
         run_id='my_run_id')
     component_info = data_types.ComponentInfo(
-        component_type='a.b.c', component_id='my_component_id')
+        component_type='a.b.c',
+        component_id='my_component_id',
+        pipeline_info=pipeline_info)
     self._mock_metadata.get_artifacts_by_info.side_effect = list(
         input_dict['input_a'].get())
     self._mock_metadata.register_execution.side_effect = [execution_id]
     self._mock_metadata.previous_execution.side_effect = [None]
-    self._mock_metadata.register_run_context_if_not_exists.side_effect = [
-        context_id
-    ]
+    self._mock_metadata.register_contexts_if_not_exists.side_effect = [contexts]
 
     driver = base_driver.BaseDriver(metadata_handler=self._mock_metadata)
     execution_decision = driver.pre_execution(
@@ -131,7 +132,7 @@ class BaseDriverTest(tf.test.TestCase):
                 artifacts=[types.Artifact(type_name='output_a')])
     }
     execution_id = 1
-    context_id = 123
+    contexts = [metadata_store_pb2.Context()]
     exec_properties = copy.deepcopy(self._exec_properties)
     driver_args = data_types.DriverArgs(enable_cache=True)
     pipeline_info = data_types.PipelineInfo(
@@ -139,14 +140,14 @@ class BaseDriverTest(tf.test.TestCase):
         pipeline_root=os.environ.get('TEST_TMP_DIR', self.get_temp_dir()),
         run_id='my_run_id')
     component_info = data_types.ComponentInfo(
-        component_type='a.b.c', component_id='my_component_id')
+        component_type='a.b.c',
+        component_id='my_component_id',
+        pipeline_info=pipeline_info)
     self._mock_metadata.get_artifacts_by_info.side_effect = list(
         input_dict['input_a'].get())
     self._mock_metadata.register_execution.side_effect = [execution_id]
     self._mock_metadata.previous_execution.side_effect = [2]
-    self._mock_metadata.register_run_context_if_not_exists.side_effect = [
-        context_id
-    ]
+    self._mock_metadata.register_contexts_if_not_exists.side_effect = [contexts]
     self._mock_metadata.fetch_previous_result_artifacts.side_effect = [
         self._output_artifacts
     ]

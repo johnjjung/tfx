@@ -207,13 +207,13 @@ class BaseDriver(object):
     Returns:
       the id of the upcoming execution
     """
-    run_context_id = self._metadata_handler.register_run_context_if_not_exists(
-        pipeline_info)
+    contexts = self._metadata_handler.register_contexts_if_not_exists(
+        pipeline_info, component_info)
     execution_id = self._metadata_handler.register_execution(
         exec_properties=exec_properties,
         pipeline_info=pipeline_info,
         component_info=component_info,
-        run_context_id=run_context_id)
+        contexts=contexts)
     absl.logging.debug('Execution id of the upcoming component execution is %s',
                        execution_id)
     return execution_id
